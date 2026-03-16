@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabaseClient'
-import { Play, Loader2, Music, Check, X, Users, Trophy } from 'lucide-react'
+import { Play, Loader2, Music, Check, X, Users, Trophy, SkipForward } from 'lucide-react'
 import YouTube from 'react-youtube'
+import { motion, AnimatePresence } from 'framer-motion'
 
 // The Categories the Host can choose from
 const CATEGORIES = [
@@ -37,6 +38,16 @@ export default function HostPage() {
   const [votes, setVotes] = useState<{ correct: number, wrong: number }>({ correct: 0, wrong: 0 })
   const [category, setCategory] = useState<string>('Pop Hits 2024')
   const [customUrl, setCustomUrl] = useState<string>('')
+  
+  const [replayTimer, setReplayTimer] = useState<NodeJS.Timeout | null>(null)
+  const [isPlayingReplay, setIsPlayingReplay] = useState<boolean>(false)
+  const [roundTimer, setRoundTimer] = useState<number>(30)
+  const [resultsTimer, setResultsTimer] = useState<number>(30)
+  
+  const roundIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const resultsIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  
+  const [excludedPlayers, setExcludedPlayers] = useState<string[]>([])
 
   const playerRef = useRef<any>(null)
 
@@ -86,6 +97,15 @@ export default function HostPage() {
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` },
         (payload) => {
           const updatedRoom = payload.new as any;
+          
+          if (updatedRoom.status === 'playing') {
+             // Started playing a song (initial or rebound)
+             startRoundTimer()
+          } else {
+             // Buzzed, voting, results... stop the 30s song timer
+             clearRoundTimer()
+          }
+          
           if (updatedRoom.status === 'buzzed' && updatedRoom.buzzed_player_id) {
             handleBuzzerPressed(updatedRoom.buzzed_player_id)
           }
@@ -97,13 +117,13 @@ export default function HostPage() {
       .channel('public:votes')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'votes', filter: `room_id=eq.${roomId}` },
         (payload) => {
-          setVotes(prev => ({
-            correct: prev.correct + (payload.new.is_correct ? 1 : 0),
-            wrong: prev.wrong + (!payload.new.is_correct ? 1 : 0)
-          }))
-
-          // Check if everyone voted
-          checkAllVotes()
+          setVotes(prev => {
+            const nextVotes = {
+              correct: prev.correct + (payload.new.is_correct ? 1 : 0),
+              wrong: prev.wrong + (!payload.new.is_correct ? 1 : 0)
+            }
+            return nextVotes;
+          })
         })
       .subscribe()
 
@@ -114,6 +134,122 @@ export default function HostPage() {
     }
   }, [roomId])
 
+  // Effect to handle auto-advance or auto-rebound when all votes are cast
+  useEffect(() => {
+    if (status !== 'voting' || players.length <= 1) return;
+    
+    // Total players minus the one who buzzed
+    const totalVoters = players.length - 1;
+    const currentVotes = votes.correct + votes.wrong;
+
+    if (currentVotes >= totalVoters && totalVoters > 0) {
+      // Auto-advance
+      const isCorrect = votes.correct >= votes.wrong;
+      
+      if (isCorrect) {
+        // Go directly to results
+        showResults(true);
+      } else {
+        // Auto-rebound
+        handleAutomaticRebound();
+      }
+    }
+  }, [votes, players, status])
+
+  const startRoundTimer = () => {
+    clearRoundTimer();
+    setRoundTimer(30);
+    roundIntervalRef.current = setInterval(() => {
+      setRoundTimer((prev) => {
+        if (prev <= 1) {
+          clearRoundTimer();
+          handleRoundTimeout();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  }
+
+  const clearRoundTimer = () => {
+    if (roundIntervalRef.current) {
+      clearInterval(roundIntervalRef.current);
+      roundIntervalRef.current = null;
+    }
+  }
+
+  const startResultsTimer = () => {
+    clearResultsTimer();
+    setResultsTimer(30);
+    resultsIntervalRef.current = setInterval(() => {
+      setResultsTimer((prev) => {
+        if (prev <= 1) {
+          clearResultsTimer();
+          handleNextRound();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  }
+
+  const clearResultsTimer = () => {
+    if (resultsIntervalRef.current) {
+      clearInterval(resultsIntervalRef.current);
+      resultsIntervalRef.current = null;
+    }
+  }
+
+  const handleRoundTimeout = async () => {
+    if (!roomId) return;
+    
+    // Time is up, nobody guessed. Go directly to results.
+    setStatus('results')
+    
+    if (playerRef.current && typeof playerRef.current.pauseVideo === 'function') {
+      try { playerRef.current.pauseVideo() } catch(e){}
+    }
+    
+    await supabase.from('rooms').update({ status: 'results' }).eq('id', roomId)
+    startResultsTimer()
+  }
+
+  const handleAutomaticRebound = async () => {
+    if (!roomId || !buzzedPlayer) return
+
+    clearRoundTimer()
+    
+    // Subtract score from buzzed player immediately without showing results screen
+    await supabase.from('players').update({
+      score: buzzedPlayer.score - 1
+    }).eq('id', buzzedPlayer.id)
+    
+    setExcludedPlayers(prev => [...prev, buzzedPlayer.id])
+
+    // Wait slightly so people see it
+    setTimeout(async () => {
+      // Return to playing state
+      await supabase.from('rooms').update({ 
+        status: 'playing',
+        buzzed_player_id: null 
+      }).eq('id', roomId)
+      
+      setStatus('playing')
+      setBuzzedPlayer(null)
+      setVotes({ correct: 0, wrong: 0 })
+      fetchPlayers() // refresh scores since we deducted points
+      
+      // Resume video exactly from where it was
+      if (playerRef.current && typeof playerRef.current.playVideo === 'function') {
+        try {
+          playerRef.current.playVideo()
+        } catch (e) { console.error("Could not resume youtube", e) }
+      }
+      
+      startRoundTimer()
+    }, 2000)
+  }
+
   const fetchPlayers = async () => {
     if (!roomId) return
     const { data } = await supabase.from('players').select('*').eq('room_id', roomId).order('score', { ascending: false })
@@ -123,6 +259,7 @@ export default function HostPage() {
   const startGame = async () => {
     try {
       setStatus('playing')
+      setExcludedPlayers([])
 
       let fetchUrl = `/api/youtube?category=${encodeURIComponent(category)}`
 
@@ -195,7 +332,7 @@ export default function HostPage() {
 
     setStatus('buzzed')
 
-    if (playerRef.current) {
+    if (playerRef.current && typeof playerRef.current.pauseVideo === 'function') {
       try {
         playerRef.current.pauseVideo()
       } catch (e) { console.error("Could not pause youtube", e) }
@@ -220,29 +357,52 @@ export default function HostPage() {
   }
 
   const checkAllVotes = async () => {
-    // This is simple logic - ideally check if votes count == players length - 1 (the one who buzzed doesn't vote)
-    // For MVP, we'll let results trigger manually or after timeout
+    // Moved to useEffect to access updated total count in state naturally
   }
 
-  const showResults = async () => {
+  const showResults = async (isCorrectVote: boolean) => {
     if (!buzzedPlayer || !roomId) return
 
     setStatus('results')
+    clearRoundTimer()
 
-    // Calculate outcome
-    const isCorrect = votes.correct >= votes.wrong
-    const pointsChange = isCorrect ? 1 : -1
+    const pointsChange = isCorrectVote ? 1 : 0
 
-    // Update score
-    await supabase.from('players').update({
-      score: buzzedPlayer.score + pointsChange
-    }).eq('id', buzzedPlayer.id)
+    if (pointsChange !== 0) {
+      // Update score (only updates for correct. Wrong was updated during rebound)
+      await supabase.from('players').update({
+        score: buzzedPlayer.score + pointsChange
+      }).eq('id', buzzedPlayer.id)
+    }
 
     await supabase.from('rooms').update({ status: 'results' }).eq('id', roomId)
     fetchPlayers()
+    startResultsTimer()
+    
+    // 3. Reproducción exacta si fue correcta
+    if (isCorrectVote && playerRef.current && typeof playerRef.current.playVideo === 'function') {
+      // It's already playing on Results because we don't pause it here explicitly. But let's assure it explicitly:
+      try {
+        playerRef.current.playVideo()
+        setIsPlayingReplay(true)
+      } catch (e) { console.error("Replay err", e) }
+    } else {
+        setIsPlayingReplay(false)
+    }
+  }
+
+  const pauseReplay = () => {
+    setIsPlayingReplay(false)
+    if (playerRef.current && typeof playerRef.current.pauseVideo === 'function') {
+      try {
+        playerRef.current.pauseVideo()
+      } catch (e) { console.error("Pause replay err", e) }
+    }
   }
 
   const handleNextRound = async () => {
+    pauseReplay()
+    clearResultsTimer()
     await startGame()
   }
 
@@ -312,11 +472,21 @@ export default function HostPage() {
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-12">
-              {players.map(p => (
-                <div key={p.id} className="bg-indigo-500/20 rounded-xl p-4 font-bold text-xl border border-indigo-400/30 animate-in zoom-in-50">
-                  {p.name}
-                </div>
-              ))}
+              <AnimatePresence>
+                {players.map(p => (
+                  <motion.div 
+                    layout
+                    transition={{ duration: 0.8, type: 'spring' }}
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.8 }}
+                    key={p.id} 
+                    className="bg-indigo-500/20 rounded-xl p-4 font-bold text-xl border border-indigo-400/30"
+                  >
+                    {p.name}
+                  </motion.div>
+                ))}
+              </AnimatePresence>
             </div>
 
             {players.length > 0 && (
@@ -369,7 +539,12 @@ export default function HostPage() {
 
         {/* State: PLAYING */}
         {status === 'playing' && (
-          <div className="text-center animate-in zoom-in duration-500">
+          <div className="text-center animate-in zoom-in duration-500 flex flex-col items-center">
+            
+            <div className="text-4xl font-black mb-8 px-6 py-2 bg-black/40 rounded-full border border-white/10 text-pink-400">
+              {roundTimer}s
+            </div>
+
             <div className="relative w-64 h-64 mx-auto mb-12">
               <div className="absolute inset-0 bg-blue-500 rounded-full animate-ping opacity-20"></div>
               <div className="absolute inset-4 bg-purple-500 rounded-full animate-pulse opacity-40"></div>
@@ -429,12 +604,12 @@ export default function HostPage() {
               <p className="text-2xl text-purple-200">
                 Voten en sus celulares ({votes.correct + votes.wrong} / {players.length - 1} votos)
               </p>
-              <button
-                onClick={showResults}
-                className="bg-white text-indigo-900 px-8 py-4 rounded-xl text-2xl font-bold hover:bg-slate-200 transition"
-              >
-                Cerrar Votación y Ver Resultados
-              </button>
+              
+              {votes.wrong > votes.correct && (votes.correct + votes.wrong) === (players.length - 1) && (
+                <div className="text-3xl font-bold text-rose-400 animate-pulse mt-4">
+                  ¡Mayoría incorrecta! Preparando rebote automático...
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -449,26 +624,37 @@ export default function HostPage() {
                 Ranking Final
               </h3>
               <div className="flex flex-col gap-4">
-                {players.map((p, i) => (
-                  <div key={p.id} className="flex justify-between items-center bg-black/20 p-4 rounded-xl">
-                    <div className="flex items-center gap-4">
-                      <span className="text-2xl font-black text-white/40">#{i + 1}</span>
-                      <span className="text-2xl font-bold">{p.name}</span>
-                    </div>
-                    <span className="text-3xl font-black bg-clip-text text-transparent bg-gradient-to-r from-yellow-300 to-orange-400">
-                      {p.score} pts
-                    </span>
-                  </div>
-                ))}
+                <AnimatePresence>
+                  {players.map((p, i) => (
+                    <motion.div 
+                      layout
+                      transition={{ duration: 0.8, type: 'spring' }}
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      key={p.id} 
+                      className="flex justify-between items-center bg-black/20 p-4 rounded-xl"
+                    >
+                      <div className="flex items-center gap-4">
+                        <span className="text-2xl font-black text-white/40">#{i + 1}</span>
+                        <span className="text-2xl font-bold">{p.name}</span>
+                      </div>
+                      <span className="text-3xl font-black bg-clip-text text-transparent bg-gradient-to-r from-yellow-300 to-orange-400">
+                        {p.score} pts
+                      </span>
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
               </div>
             </div>
 
             <div className="flex-1 flex flex-col items-center text-center">
               <p className="text-3xl font-medium mb-8">
-                {votes.correct >= votes.wrong ? (
-                  <span className="text-emerald-400">¡La mayoría votó Correcto!✅<br />+1 Punto para {buzzedPlayer?.name}</span>
+                {!buzzedPlayer ? (
+                  <span className="text-amber-400 block mb-2">¡Nadie adivinó a tiempo! ⏰</span>
+                ) : votes.correct >= votes.wrong ? (
+                  <span className="text-emerald-400 block mb-2">¡La mayoría votó Correcto!✅<br />+1 Punto para {buzzedPlayer.name}</span>
                 ) : (
-                  <span className="text-rose-400">¡La mayoría votó Incorrecto!❌<br />-1 Punto para {buzzedPlayer?.name}</span>
+                  <span className="text-rose-400 mb-2">¡La mayoría votó Incorrecto!❌</span>
                 )}
               </p>
 
@@ -483,12 +669,15 @@ export default function HostPage() {
               <h3 className="text-4xl font-black mb-2">{currentSong.trackName}</h3>
               <p className="text-2xl text-purple-300 mb-12">{currentSong.artistName}</p>
 
-              <button
-                onClick={handleNextRound}
-                className="bg-gradient-to-r from-blue-500 to-indigo-600 px-10 py-5 rounded-full text-2xl font-bold shadow-lg hover:scale-105 transition"
-              >
-                Siguiente Ronda ➔
-              </button>
+              <div className="flex flex-col gap-4 items-center">
+                <button
+                  onClick={handleNextRound}
+                  className="bg-gradient-to-r from-blue-500 to-indigo-600 px-10 py-5 rounded-full text-2xl font-bold shadow-[0_0_30px_rgba(79,70,229,0.5)] hover:scale-105 transition flex items-center gap-3"
+                >
+                  Siguiente Ronda ➔
+                  <span className="bg-black/30 px-3 py-1 rounded-full text-lg">{resultsTimer}s</span>
+                </button>
+              </div>
             </div>
 
           </div>

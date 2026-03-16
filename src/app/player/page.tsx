@@ -16,8 +16,8 @@ export default function PlayerPage() {
   const [buzzedPlayerId, setBuzzedPlayerId] = useState<string | null>(null)
   const [buzzedPlayerName, setBuzzedPlayerName] = useState<string | null>(null)
   const [hasVoted, setHasVoted] = useState(false)
-  
   const [error, setError] = useState('')
+  const [isExcluded, setIsExcluded] = useState(false)
 
   // Realtime Subscription
   useEffect(() => {
@@ -28,6 +28,26 @@ export default function PlayerPage() {
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` }, 
         async (payload) => {
           const room = payload.new as any
+          
+          // Detect fresh round vs rebound
+          if (room.status === 'playing') {
+            // If we came from 'voting', it means somebody was evaluated.
+            // If it was ME, I should be excluded from this rebound.
+            if (status === 'voting' && buzzedPlayerId === playerId) {
+              setIsExcluded(true)
+            } else if (status === 'lobby' || status === 'results') {
+              // Completely new round
+              setIsExcluded(false)
+            }
+            // Reset base flags
+            setHasVoted(false)
+            setBuzzedPlayerId(null)
+          }
+          
+          if (room.status === 'lobby') {
+             setIsExcluded(false)
+          }
+
           setStatus(room.status)
           
           if (room.status === 'buzzed' && room.buzzed_player_id) {
@@ -37,18 +57,13 @@ export default function PlayerPage() {
               setBuzzedPlayerName(data?.name || 'Otro jugador')
             }
           }
-          
-          if (room.status === 'playing') {
-            setHasVoted(false)
-            setBuzzedPlayerId(null)
-          }
       })
       .subscribe()
 
     return () => {
       supabase.removeChannel(roomChannel)
     }
-  }, [roomId, playerId])
+  }, [roomId, playerId, status, buzzedPlayerId])
 
   const joinRoom = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -212,7 +227,7 @@ export default function PlayerPage() {
         )}
 
         {/* State: PLAYING (Buzzer) */}
-        {status === 'playing' && (
+        {status === 'playing' && !isExcluded && (
           <button 
             onPointerDown={(e) => {
               e.preventDefault(); // Prevent ghost clicks
@@ -223,6 +238,14 @@ export default function PlayerPage() {
             <Bell className="w-24 h-24 text-white group-hover:scale-110 transition-transform pointer-events-none" />
             <span className="text-5xl font-black text-white uppercase tracking-widest drop-shadow-md pointer-events-none">Apretar</span>
           </button>
+        )}
+
+        {status === 'playing' && isExcluded && (
+          <div className="text-center animate-in zoom-in duration-500 bg-black/40 p-8 rounded-3xl border border-rose-500/30">
+            <X className="w-16 h-16 text-rose-500 mx-auto mb-6" />
+            <h2 className="text-3xl font-bold text-white mb-2">Eliminado</h2>
+            <p className="text-indigo-300">Te equivocaste en esta ronda.<br/>Espera a que alguien más adivine o pase el tiempo.</p>
+          </div>
         )}
 
         {/* State: BUZZED */}
