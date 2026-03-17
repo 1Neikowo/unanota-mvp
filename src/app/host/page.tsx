@@ -2,18 +2,18 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabaseClient'
-import { Play, Loader2, Music, Check, X, Users, Trophy, SkipForward } from 'lucide-react'
+import { Play, Loader2, Music, Check, X, Users, Trophy, ClockAlert } from 'lucide-react'
 import YouTube from 'react-youtube'
 import { motion, AnimatePresence } from 'framer-motion'
 
 // The Categories the Host can choose from
 const CATEGORIES = [
-  { name: 'Pop Hits 2024' },
+  { name: 'Pop Hits 2026' },
   { name: 'Top 50 Chile' },
   { name: 'Rock de los 80' },
   { name: 'Reggaeton Antiguo' },
   { name: 'Anime Openings' },
-  { name: 'Disney Clásicos' },
+  { name: 'Pop 2000s' },
   // EJEMPLO de cómo agregar una con ID de Playlist directa:
   { name: 'Easykid', playlistId: 'PLxA687tYuMWh_K7R-29OGzhIma_x2RpzZ' }
 ]
@@ -38,15 +38,15 @@ export default function HostPage() {
   const [votes, setVotes] = useState<{ correct: number, wrong: number }>({ correct: 0, wrong: 0 })
   const [category, setCategory] = useState<string>('Pop Hits 2024')
   const [customUrl, setCustomUrl] = useState<string>('')
-  
+
   const [replayTimer, setReplayTimer] = useState<NodeJS.Timeout | null>(null)
   const [isPlayingReplay, setIsPlayingReplay] = useState<boolean>(false)
   const [roundTimer, setRoundTimer] = useState<number>(30)
   const [resultsTimer, setResultsTimer] = useState<number>(30)
-  
+
   const roundIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const resultsIntervalRef = useRef<NodeJS.Timeout | null>(null)
-  
+
   const [excludedPlayers, setExcludedPlayers] = useState<string[]>([])
 
   const playerRef = useRef<any>(null)
@@ -97,15 +97,12 @@ export default function HostPage() {
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rooms', filter: `id=eq.${roomId}` },
         (payload) => {
           const updatedRoom = payload.new as any;
-          
-          if (updatedRoom.status === 'playing') {
-             // Started playing a song (initial or rebound)
-             startRoundTimer()
-          } else {
-             // Buzzed, voting, results... stop the 30s song timer
-             clearRoundTimer()
+
+          if (updatedRoom.status !== 'playing') {
+            // Buzzed, voting, results... stop the 30s song timer
+            clearRoundTimer()
           }
-          
+
           if (updatedRoom.status === 'buzzed' && updatedRoom.buzzed_player_id) {
             handleBuzzerPressed(updatedRoom.buzzed_player_id)
           }
@@ -137,7 +134,7 @@ export default function HostPage() {
   // Effect to handle auto-advance or auto-rebound when all votes are cast
   useEffect(() => {
     if (status !== 'voting' || players.length <= 1) return;
-    
+
     // Total players minus the one who buzzed
     const totalVoters = players.length - 1;
     const currentVotes = votes.correct + votes.wrong;
@@ -145,7 +142,7 @@ export default function HostPage() {
     if (currentVotes >= totalVoters && totalVoters > 0) {
       // Auto-advance
       const isCorrect = votes.correct >= votes.wrong;
-      
+
       if (isCorrect) {
         // Go directly to results
         showResults(true);
@@ -156,9 +153,11 @@ export default function HostPage() {
     }
   }, [votes, players, status])
 
-  const startRoundTimer = () => {
+  const startRoundTimer = (reset: boolean = true) => {
     clearRoundTimer();
-    setRoundTimer(30);
+    if (reset) {
+      setRoundTimer(30);
+    }
     roundIntervalRef.current = setInterval(() => {
       setRoundTimer((prev) => {
         if (prev <= 1) {
@@ -202,14 +201,14 @@ export default function HostPage() {
 
   const handleRoundTimeout = async () => {
     if (!roomId) return;
-    
+
     // Time is up, nobody guessed. Go directly to results.
     setStatus('results')
-    
+
     if (playerRef.current && typeof playerRef.current.pauseVideo === 'function') {
-      try { playerRef.current.pauseVideo() } catch(e){}
+      try { playerRef.current.pauseVideo() } catch (e) { }
     }
-    
+
     await supabase.from('rooms').update({ status: 'results' }).eq('id', roomId)
     startResultsTimer()
   }
@@ -218,35 +217,35 @@ export default function HostPage() {
     if (!roomId || !buzzedPlayer) return
 
     clearRoundTimer()
-    
+
     // Subtract score from buzzed player immediately without showing results screen
     await supabase.from('players').update({
       score: buzzedPlayer.score - 1
     }).eq('id', buzzedPlayer.id)
-    
+
     setExcludedPlayers(prev => [...prev, buzzedPlayer.id])
 
     // Wait slightly so people see it
     setTimeout(async () => {
       // Return to playing state
-      await supabase.from('rooms').update({ 
+      await supabase.from('rooms').update({
         status: 'playing',
-        buzzed_player_id: null 
+        buzzed_player_id: null
       }).eq('id', roomId)
-      
+
       setStatus('playing')
       setBuzzedPlayer(null)
       setVotes({ correct: 0, wrong: 0 })
       fetchPlayers() // refresh scores since we deducted points
-      
+
       // Resume video exactly from where it was
       if (playerRef.current && typeof playerRef.current.playVideo === 'function') {
         try {
           playerRef.current.playVideo()
         } catch (e) { console.error("Could not resume youtube", e) }
       }
-      
-      startRoundTimer()
+
+      startRoundTimer(false)
     }, 2000)
   }
 
@@ -260,6 +259,8 @@ export default function HostPage() {
     try {
       setStatus('playing')
       setExcludedPlayers([])
+      clearRoundTimer();
+      setRoundTimer(30);
 
       let fetchUrl = `/api/youtube?category=${encodeURIComponent(category)}`
 
@@ -318,7 +319,7 @@ export default function HostPage() {
         buzzed_player_id: null
       }).eq('id', roomId)
 
-      // We no longer imperatively load the video here. The <YouTube videoId={...} /> prop will handle it.
+      startRoundTimer(true)
 
     } catch (e) {
       console.error("Error starting game", e)
@@ -378,7 +379,7 @@ export default function HostPage() {
     await supabase.from('rooms').update({ status: 'results' }).eq('id', roomId)
     fetchPlayers()
     startResultsTimer()
-    
+
     // 3. Reproducción exacta si fue correcta
     if (isCorrectVote && playerRef.current && typeof playerRef.current.playVideo === 'function') {
       // It's already playing on Results because we don't pause it here explicitly. But let's assure it explicitly:
@@ -387,7 +388,7 @@ export default function HostPage() {
         setIsPlayingReplay(true)
       } catch (e) { console.error("Replay err", e) }
     } else {
-        setIsPlayingReplay(false)
+      setIsPlayingReplay(false)
     }
   }
 
@@ -451,37 +452,97 @@ export default function HostPage() {
         />
       </div>
 
-      <div className="container mx-auto px-4 h-screen flex flex-col justify-center items-center py-12 relative z-10">
+      <div className="container mx-auto px-4 min-h-[100dvh] flex flex-col justify-center items-center py-6 relative z-10 w-full max-w-5xl">
 
         {/* State: LOBBY */}
         {status === 'lobby' && (
-          <div className="text-center w-full max-w-4xl animate-in fade-in slide-in-from-bottom-8 duration-700">
-            <h1 className="text-6xl md:text-8xl font-black mb-8 bg-clip-text text-transparent bg-gradient-to-r from-pink-400 to-blue-400">
-              Music Party Game
-            </h1>
+          <div className="text-center w-full max-w-6xl animate-in fade-in slide-in-from-bottom-8 duration-700 flex flex-col justify-between h-full gap-4">
 
-            <div className="bg-white/10 backdrop-blur-lg rounded-3xl p-12 border border-white/20 shadow-2xl mb-12">
-              <p className="text-2xl font-medium text-purple-200 mb-4">Únete en tu celular ingresando este PIN:</p>
-              <div className="text-8xl md:text-9xl font-mono font-black tracking-widest text-white mb-8">
-                {pinCode}
-              </div>
-              <div className="flex items-center justify-center gap-3 text-xl">
-                <Users className="w-8 h-8 text-blue-400" />
-                <span>{players.length} Jugadores en la sala</span>
-              </div>
+            {/* Cabecera */}
+            <div>
+              <h1 className="text-5xl md:text-7xl lg:text-8xl font-black md:mt-4 mb-2 bg-clip-text text-transparent bg-gradient-to-r from-pink-400 to-blue-400 leading-tight">
+                Adivina la Canción
+              </h1>
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-12">
+            {/* Fila principal: PIN a la izquierda, Categorías a la derecha (en pantallas grandes) */}
+            <div className="flex flex-col md:flex-row gap-6 items-stretch w-full flex-1">
+
+              {/* Columna Izquierda: PIN y Jugadores */}
+              <div className="bg-white/10 backdrop-blur-lg rounded-3xl p-8 border border-white/20 shadow-2xl flex-1 flex flex-col justify-center">
+                <p className="text-2xl lg:text-3xl font-medium text-purple-200 mb-4 whitespace-nowrap">Únete con el PIN:</p>
+                <div className="text-8xl lg:text-[8rem] font-mono font-black tracking-widest text-white mb-6 leading-none">
+                  {pinCode}
+                </div>
+                <div className="flex items-center justify-center gap-3 text-2xl bg-black/20 p-4 rounded-2xl mx-auto">
+                  <Users className="w-8 h-8 text-blue-400" />
+                  <span>{players.length} en la sala</span>
+                </div>
+              </div>
+
+              {/* Columna Derecha: Categorías de juego */}
+              {players.length > 0 && (
+                <div className="bg-white/5 rounded-3xl p-8 border border-white/10 flex-[1.5] backdrop-blur-md flex flex-col justify-between h-full">
+                  <div>
+                    <h3 className="text-3xl font-bold mb-6 text-purple-200">Elige la Categoría:</h3>
+
+                    <div className="flex flex-wrap gap-3 justify-center mb-6">
+                      {CATEGORIES.map((cat) => (
+                        <button
+                          key={cat.name}
+                          onClick={() => {
+                            setCategory(cat.name);
+                            setCustomUrl(''); // Clear custom input when clicking a predefined option
+                          }}
+                          className={`px-5 py-2.5 rounded-full text-xl font-bold transition-all whitespace-nowrap ${category === cat.name && customUrl === ''
+                            ? 'bg-pink-500 text-white shadow-[0_0_20px_rgba(236,72,153,0.6)] scale-105'
+                            : 'bg-white/10 text-indigo-200 hover:bg-white/20'
+                            }`}
+                        >
+                          {cat.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="w-full">
+                    <p className="text-base text-indigo-300 mb-3 font-medium">¿O prefieres tu propia Playlist de YouTube?</p>
+                    <input
+                      type="text"
+                      placeholder="Pega el link de la Playlist aquí..."
+                      value={customUrl}
+                      onChange={(e) => {
+                        setCustomUrl(e.target.value)
+                        setCategory('') // deselect default categories
+                      }}
+                      className="w-full bg-black/40 border border-indigo-500/30 rounded-2xl px-6 py-4 text-white text-lg placeholder-indigo-400/50 focus:outline-none focus:ring-2 focus:ring-pink-500 transition-all text-center mb-6"
+                    />
+
+                    <button
+                      onClick={startGame}
+                      disabled={!category && !customUrl}
+                      className="bg-gradient-to-r from-pink-500 to-violet-600 w-full py-5 rounded-2xl text-3xl font-black hover:scale-[1.02] transition-transform disabled:opacity-50 disabled:hover:scale-100 uppercase tracking-wide shadow-[0_0_30px_rgba(236,72,153,0.5)] flex items-center justify-center gap-3"
+                    >
+                      <Play className="w-8 h-8" fill="currentColor" />
+                      EMPEZAR JUEGO
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Fila Inferior: Grid de Jugadores interactivos */}
+            <div className={`grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-3 mt-2 ${players.length === 0 ? 'opacity-0' : 'opacity-100'} transition-opacity`}>
               <AnimatePresence>
                 {players.map(p => (
-                  <motion.div 
+                  <motion.div
                     layout
                     transition={{ duration: 0.8, type: 'spring' }}
                     initial={{ opacity: 0, scale: 0.8 }}
                     animate={{ opacity: 1, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.8 }}
-                    key={p.id} 
-                    className="bg-indigo-500/20 rounded-xl p-4 font-bold text-xl border border-indigo-400/30"
+                    key={p.id}
+                    className="bg-indigo-500/20 rounded-xl p-3 font-bold text-xl border border-indigo-400/30 truncate"
                   >
                     {p.name}
                   </motion.div>
@@ -489,58 +550,13 @@ export default function HostPage() {
               </AnimatePresence>
             </div>
 
-            {players.length > 0 && (
-              <div className="bg-white/5 rounded-3xl p-8 border border-white/10 max-w-2xl mx-auto backdrop-blur-md mb-8">
-                <h3 className="text-2xl font-bold mb-6 text-purple-200">Elige la Categoría Musical:</h3>
-
-                <div className="flex flex-wrap gap-3 justify-center mb-8">
-                  {CATEGORIES.map((cat) => (
-                    <button
-                      key={cat.name}
-                      onClick={() => {
-                        setCategory(cat.name);
-                        setCustomUrl(''); // Clear custom input when clicking a predefined option
-                      }}
-                      className={`px-4 py-2 rounded-full text-lg font-bold transition-all ${category === cat.name && customUrl === ''
-                        ? 'bg-pink-500 text-white shadow-[0_0_15px_rgba(236,72,153,0.6)] scale-105'
-                        : 'bg-white/10 text-indigo-200 hover:bg-white/20'
-                        }`}
-                    >
-                      {cat.name}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="mb-8 w-full max-w-md mx-auto">
-                  <p className="text-sm text-indigo-300 mb-2 font-medium">¿O prefieres tu propia Playlist de YouTube?</p>
-                  <input
-                    type="text"
-                    placeholder="Pega el link de la Playlist aquí..."
-                    value={customUrl}
-                    onChange={(e) => {
-                      setCustomUrl(e.target.value)
-                      if (e.target.value !== '') setCategory('Personalizada')
-                    }}
-                    className="w-full px-4 py-3 rounded-xl bg-black/30 border border-white/20 text-white placeholder-white/40 outline-none focus:border-pink-500 focus:ring-1 focus:ring-pink-500 transition-all text-center"
-                  />
-                </div>
-
-                <button
-                  onClick={startGame}
-                  className="group bg-gradient-to-r from-pink-500 to-violet-500 hover:from-pink-400 hover:to-violet-400 text-white px-12 py-6 rounded-full text-3xl font-black shadow-[0_0_40px_rgba(236,72,153,0.5)] transition-all hover:scale-105 active:scale-95 flex items-center justify-center gap-4 mx-auto w-full"
-                >
-                  <Play className="w-10 h-10 fill-current group-hover:animate-pulse" />
-                  EMPEZAR JUEGO
-                </button>
-              </div>
-            )}
           </div>
         )}
 
         {/* State: PLAYING */}
         {status === 'playing' && (
           <div className="text-center animate-in zoom-in duration-500 flex flex-col items-center">
-            
+
             <div className="text-4xl font-black mb-8 px-6 py-2 bg-black/40 rounded-full border border-white/10 text-pink-400">
               {roundTimer}s
             </div>
@@ -581,33 +597,51 @@ export default function HostPage() {
 
         {/* State: VOTING */}
         {status === 'voting' && buzzedPlayer && (
-          <div className="text-center w-full max-w-4xl">
-            <h2 className="text-6xl font-bold mb-12">
-              ¿Le achuntó {buzzedPlayer.name}?
+          <div className="text-center w-full max-w-5xl animate-in zoom-in-95 duration-700">
+            <h2 className="text-4xl md:text-6xl lg:text-7xl font-black mb-16 text-white drop-shadow-xl inline-flex flex-wrap items-center justify-center gap-4">
+              ¿Le achuntó 
+              <span className="text-pink-400 bg-black/20 px-6 py-2 rounded-2xl truncate max-w-[50vw] inline-block align-bottom shadow-[0_0_20px_rgba(236,72,153,0.3)] border border-pink-500/20">
+                {buzzedPlayer.name}
+              </span>?
             </h2>
 
-            <div className="grid grid-cols-2 gap-12 mb-16">
-              <div className="bg-emerald-500/20 rounded-3xl p-12 border-4 border-emerald-500/50 flex flex-col items-center">
-                <Check className="w-32 h-32 text-emerald-400 mb-6" />
-                <span className="text-6xl font-black text-emerald-100">{votes.correct}</span>
-                <span className="text-2xl mt-4 text-emerald-300 font-bold uppercase tracking-widest">Correcto</span>
+            <div className="flex flex-col md:flex-row gap-8 md:gap-16 mb-16 justify-center">
+              <div className="flex-1 bg-gradient-to-br from-emerald-500/10 to-emerald-900/40 rounded-[3rem] p-12 border border-emerald-500/30 shadow-[0_0_50px_rgba(16,185,129,0.2)] backdrop-blur-md flex flex-col items-center relative overflow-hidden group">
+                <div className="absolute inset-0 bg-emerald-400/10 translate-y-full group-hover:translate-y-0 transition-transform duration-500"></div>
+                <Check className="w-40 h-40 text-emerald-400 mb-6 drop-shadow-[0_0_30px_rgba(52,211,153,0.8)]" />
+                <span className="text-8xl font-black text-transparent bg-clip-text bg-gradient-to-b from-emerald-100 to-emerald-400 drop-shadow-2xl">{votes.correct}</span>
+                <span className="text-3xl mt-6 text-emerald-300 font-bold uppercase tracking-widest">Correcto</span>
               </div>
 
-              <div className="bg-rose-500/20 rounded-3xl p-12 border-4 border-rose-500/50 flex flex-col items-center">
-                <X className="w-32 h-32 text-rose-400 mb-6" />
-                <span className="text-6xl font-black text-rose-100">{votes.wrong}</span>
-                <span className="text-2xl mt-4 text-rose-300 font-bold uppercase tracking-widest">Incorrecto</span>
+              <div className="flex-1 bg-gradient-to-br from-rose-500/10 to-rose-900/40 rounded-[3rem] p-12 border border-rose-500/30 shadow-[0_0_50px_rgba(244,63,94,0.2)] backdrop-blur-md flex flex-col items-center relative overflow-hidden group">
+                <div className="absolute inset-0 bg-rose-400/10 translate-y-full group-hover:translate-y-0 transition-transform duration-500"></div>
+                <X className="w-40 h-40 text-rose-400 mb-6 drop-shadow-[0_0_30px_rgba(251,113,133,0.8)]" />
+                <span className="text-8xl font-black text-transparent bg-clip-text bg-gradient-to-b from-rose-100 to-rose-400 drop-shadow-2xl">{votes.wrong}</span>
+                <span className="text-3xl mt-6 text-rose-300 font-bold uppercase tracking-widest">Incorrecto</span>
               </div>
             </div>
 
-            <div className="flex flex-col items-center gap-6">
-              <p className="text-2xl text-purple-200">
-                Voten en sus celulares ({votes.correct + votes.wrong} / {players.length - 1} votos)
-              </p>
-              
-              {votes.wrong > votes.correct && (votes.correct + votes.wrong) === (players.length - 1) && (
-                <div className="text-3xl font-bold text-rose-400 animate-pulse mt-4">
-                  ¡Mayoría incorrecta! Preparando rebote automático...
+            <div className="flex flex-col items-center w-full max-w-3xl mx-auto">
+              <div className="w-full mb-4">
+                <div className="flex justify-between text-xl text-purple-200 font-bold mb-3 uppercase tracking-wider">
+                  <span className="animate-pulse">Esperando votos...</span>
+                  <span>{votes.correct + votes.wrong} / {players.length - 1}</span>
+                </div>
+                {/* Progress bar container */}
+                <div className="w-full h-6 bg-black/40 rounded-full overflow-hidden border border-white/10 p-1">
+                  <motion.div 
+                    className="h-full bg-gradient-to-r from-pink-500 to-indigo-500 rounded-full"
+                    initial={{ width: 0 }}
+                    animate={{ width: `${((votes.correct + votes.wrong) / Math.max(1, players.length - 1)) * 100}%` }}
+                    transition={{ type: "spring", stiffness: 50 }}
+                  />
+                </div>
+              </div>
+
+              {votes.wrong > votes.correct && (votes.correct + votes.wrong) >= (players.length - 1) && (
+                <div className="text-3xl font-bold text-rose-400 animate-pulse mt-8 flex items-center gap-4 bg-rose-500/20 px-8 py-4 rounded-full border border-rose-500/30">
+                  <Loader2 className="w-8 h-8 animate-spin" />
+                  Mayoría incorrecta. ¡Preparando rebote!
                 </div>
               )}
             </div>
@@ -616,29 +650,35 @@ export default function HostPage() {
 
         {/* State: RESULTS */}
         {status === 'results' && currentSong && (
-          <div className="w-full max-w-6xl flex gap-12 items-center animate-in slide-in-from-bottom-12 duration-700">
+          <div className="w-full max-w-7xl flex flex-col lg:flex-row gap-12 lg:gap-16 items-center lg:items-stretch animate-in zoom-in-95 duration-700">
 
-            <div className="flex-1 bg-white/5 rounded-3xl p-10 backdrop-blur-md border border-white/10">
-              <h3 className="text-3xl font-bold mb-6 text-purple-300 flex items-center gap-3">
-                <Trophy className="w-8 h-8 text-yellow-400" />
-                Ranking Final
+            {/* Columna Izquierda: Ranking/Posiciones */}
+            <div className="flex-1 bg-gradient-to-br from-white/10 to-transparent rounded-[3rem] p-10 backdrop-blur-xl border border-white/20 shadow-[0_0_50px_rgba(255,255,255,0.05)] flex flex-col">
+              <h3 className="text-4xl font-black mb-8 text-transparent bg-clip-text bg-gradient-to-r from-purple-200 to-pink-300 flex items-center gap-4 justify-center lg:justify-start drop-shadow-lg">
+                <Trophy className="w-10 h-10 text-yellow-400 drop-shadow-[0_0_15px_rgba(250,204,21,0.8)]" />
+                POSICIONES
               </h3>
-              <div className="flex flex-col gap-4">
+              <div className="flex flex-col gap-4 flex-1">
                 <AnimatePresence>
                   {players.map((p, i) => (
-                    <motion.div 
+                    <motion.div
                       layout
                       transition={{ duration: 0.8, type: 'spring' }}
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      key={p.id} 
-                      className="flex justify-between items-center bg-black/20 p-4 rounded-xl"
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      key={p.id}
+                      className="flex justify-between items-center bg-white/5 hover:bg-white/10 transition-colors p-5 rounded-2xl border border-white/5 relative overflow-hidden group"
                     >
-                      <div className="flex items-center gap-4">
-                        <span className="text-2xl font-black text-white/40">#{i + 1}</span>
-                        <span className="text-2xl font-bold">{p.name}</span>
+                      {/* Efecto hover sutil en el fondo del jugador */}
+                      <div className="absolute inset-0 bg-gradient-to-r from-pink-500/10 to-transparent translate-x-[-100%] group-hover:translate-x-0 transition-transform duration-500"></div>
+                      
+                      <div className="flex items-center gap-5 relative z-10">
+                        <span className={`text-4xl font-black ${i === 0 ? 'text-yellow-400 drop-shadow-[0_0_10px_rgba(250,204,21,0.5)]' : i === 1 ? 'text-slate-300' : i === 2 ? 'text-amber-600' : 'text-white/30'}`}>
+                          #{i + 1}
+                        </span>
+                        <span className="text-3xl font-bold text-white truncate max-w-[200px]">{p.name}</span>
                       </div>
-                      <span className="text-3xl font-black bg-clip-text text-transparent bg-gradient-to-r from-yellow-300 to-orange-400">
+                      <span className="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-pink-400 to-orange-400 relative z-10">
                         {p.score} pts
                       </span>
                     </motion.div>
@@ -647,35 +687,74 @@ export default function HostPage() {
               </div>
             </div>
 
-            <div className="flex-1 flex flex-col items-center text-center">
-              <p className="text-3xl font-medium mb-8">
+            {/* Columna Derecha: Resultado y Canción */}
+            <div className="flex-[1.5] flex flex-col items-center text-center justify-between">
+              
+              {/* Banner de Resultado */}
+              <div className="w-full max-w-2xl mb-10">
                 {!buzzedPlayer ? (
-                  <span className="text-amber-400 block mb-2">¡Nadie adivinó a tiempo! ⏰</span>
+                  <div className="bg-amber-500/10 border-2 border-amber-500/50 rounded-3xl p-6 shadow-[0_0_40px_rgba(245,158,11,0.3)] animate-pulse flex items-center justify-center gap-4">
+                    <ClockAlert className="w-10 h-10 text-amber-400" />
+                    <span className="text-4xl font-black text-amber-400 block tracking-wide">¡Nadie adivinó a tiempo!</span>
+                  </div>
                 ) : votes.correct >= votes.wrong ? (
-                  <span className="text-emerald-400 block mb-2">¡La mayoría votó Correcto!✅<br />+1 Punto para {buzzedPlayer.name}</span>
+                  <div className="bg-emerald-500/10 border-2 border-emerald-500/50 rounded-3xl p-6 shadow-[0_0_50px_rgba(16,185,129,0.3)] relative overflow-hidden flex items-center justify-center gap-6">
+                    <div className="absolute inset-0 bg-gradient-to-r from-emerald-400/0 via-emerald-400/20 to-emerald-400/0 animate-[shimmer_2s_infinite]"></div>
+                    <Check className="w-16 h-16 text-emerald-400 drop-shadow-[0_0_15px_rgba(52,211,153,0.8)] relative z-10" />
+                    <div className="text-left relative z-10">
+                      <span className="text-4xl font-black text-emerald-400 block mb-1 leading-tight drop-shadow-md">¡Veredicto Correcto!</span>
+                      <span className="text-2xl text-emerald-200 font-bold">+1 Punto para {buzzedPlayer.name}</span>
+                    </div>
+                  </div>
                 ) : (
-                  <span className="text-rose-400 mb-2">¡La mayoría votó Incorrecto!❌</span>
+                  <div className="bg-rose-500/10 border-2 border-rose-500/50 rounded-3xl p-6 shadow-[0_0_50px_rgba(244,63,94,0.3)] flex items-center justify-center gap-6">
+                    <X className="w-16 h-16 text-rose-400 drop-shadow-[0_0_15px_rgba(251,113,133,0.8)]" />
+                    <div className="text-left">
+                      <span className="text-4xl font-black text-rose-400 block tracking-wide drop-shadow-md">¡Equivocado!</span>
+                      <span className="text-2xl text-rose-200 font-bold">-1 Punto para {buzzedPlayer.name}</span>
+                    </div>
+                  </div>
                 )}
-              </p>
-
-              <div className="relative group overflow-hidden rounded-2xl shadow-2xl shadow-purple-500/20 mb-8 border-4 border-white/20">
-                <img
-                  src={currentSong.artworkUrl100.replace('100x100', '400x400')}
-                  alt="Album Artwork"
-                  className="w-80 h-80 object-cover"
-                />
               </div>
 
-              <h3 className="text-4xl font-black mb-2">{currentSong.trackName}</h3>
-              <p className="text-2xl text-purple-300 mb-12">{currentSong.artistName}</p>
+              {/* Cover Art Gigante Flotante */}
+              <div className="relative group mb-10 w-full max-w-md flex justify-center">
+                {/* Glow trasero */}
+                <div className="absolute inset-0 bg-pink-500/30 blur-[100px] rounded-full group-hover:bg-indigo-500/40 transition-colors duration-700"></div>
+                <div className="relative overflow-hidden rounded-[2rem] shadow-2xl border border-white/20 animate-[float_6s_ease-in-out_infinite]">
+                  <img
+                    src={currentSong.artworkUrl100.replace('100x100', '600x600')}
+                    alt="Album Artwork"
+                    className="w-80 h-80 lg:w-96 lg:h-96 object-cover transform group-hover:scale-105 transition-transform duration-700"
+                  />
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent"></div>
+                  
+                  {/* Textos dentro de la carátula en parte inferior */}
+                  <div className="absolute bottom-0 left-0 right-0 p-8 text-left">
+                    <h3 className="text-3xl lg:text-4xl font-black mb-2 text-white drop-shadow-lg leading-tight line-clamp-2">{currentSong.trackName}</h3>
+                    <p className="text-xl lg:text-2xl text-pink-300 font-bold drop-shadow-md truncate">{currentSong.artistName}</p>
+                  </div>
+                </div>
+              </div>
 
-              <div className="flex flex-col gap-4 items-center">
+              {/* Botón Siguiente Ronda Extendido */}
+              <div className="w-full max-w-2xl px-4 mt-auto">
                 <button
                   onClick={handleNextRound}
-                  className="bg-gradient-to-r from-blue-500 to-indigo-600 px-10 py-5 rounded-full text-2xl font-bold shadow-[0_0_30px_rgba(79,70,229,0.5)] hover:scale-105 transition flex items-center gap-3"
+                  className="group relative w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 p-1 rounded-3xl shadow-[0_0_40px_rgba(79,70,229,0.4)] transition-all hover:scale-[1.02] active:scale-[0.98]"
                 >
-                  Siguiente Ronda ➔
-                  <span className="bg-black/30 px-3 py-1 rounded-full text-lg">{resultsTimer}s</span>
+                  <div className="absolute inset-0 bg-white/20 rounded-3xl blur-md group-hover:bg-white/30 transition-colors"></div>
+                  <div className="relative bg-black/20 backdrop-blur-sm rounded-[1.4rem] px-8 py-6 flex items-center justify-between">
+                    <span className="text-3xl font-black text-white tracking-wide">SIGUIENTE RONDA</span>
+                    <div className="flex items-center gap-4">
+                      <span className="bg-white/10 text-blue-200 px-4 py-2 rounded-2xl text-2xl font-bold font-mono">
+                        {resultsTimer}s
+                      </span>
+                      <div className="bg-white/20 p-2 rounded-full">
+                        <Play className="w-8 h-8 text-white fill-current group-hover:translate-x-1 transition-transform" />
+                      </div>
+                    </div>
+                  </div>
                 </button>
               </div>
             </div>
