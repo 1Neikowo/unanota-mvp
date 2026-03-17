@@ -46,6 +46,7 @@ export default function HostPage() {
 
   const roundIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const resultsIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const isProcessingVoteRef = useRef(false)
 
   const [excludedPlayers, setExcludedPlayers] = useState<string[]>([])
 
@@ -133,13 +134,19 @@ export default function HostPage() {
 
   // Effect to handle auto-advance or auto-rebound when all votes are cast
   useEffect(() => {
-    if (status !== 'voting' || players.length <= 1) return;
+    if (status !== 'voting' || players.length <= 1) {
+      isProcessingVoteRef.current = false;
+      return;
+    }
+
+    if (isProcessingVoteRef.current) return;
 
     // Total players minus the one who buzzed
     const totalVoters = players.length - 1;
     const currentVotes = votes.correct + votes.wrong;
 
     if (currentVotes >= totalVoters && totalVoters > 0) {
+      isProcessingVoteRef.current = true;
       // Auto-advance
       const isCorrect = votes.correct >= votes.wrong;
 
@@ -205,8 +212,11 @@ export default function HostPage() {
     // Time is up, nobody guessed. Go directly to results.
     setStatus('results')
 
-    if (playerRef.current && typeof playerRef.current.pauseVideo === 'function') {
-      try { playerRef.current.pauseVideo() } catch (e) { }
+    if (playerRef.current && typeof playerRef.current.playVideo === 'function') {
+      try { 
+        playerRef.current.playVideo();
+        setIsPlayingReplay(true);
+      } catch (e) { }
     }
 
     await supabase.from('rooms').update({ status: 'results' }).eq('id', roomId)
@@ -223,29 +233,51 @@ export default function HostPage() {
       score: buzzedPlayer.score - 1
     }).eq('id', buzzedPlayer.id)
 
+    const nextExcludedCount = excludedPlayers.length + 1
     setExcludedPlayers(prev => [...prev, buzzedPlayer.id])
 
     // Wait slightly so people see it
     setTimeout(async () => {
-      // Return to playing state
-      await supabase.from('rooms').update({
-        status: 'playing',
-        buzzed_player_id: null
-      }).eq('id', roomId)
+      if (nextExcludedCount >= players.length) {
+        // Everyone has guessed incorrectly. End the round.
+        if (playerRef.current && typeof playerRef.current.playVideo === 'function') {
+          try { 
+            playerRef.current.playVideo();
+            setIsPlayingReplay(true);
+          } catch (e) { }
+        }
 
-      setStatus('playing')
-      setBuzzedPlayer(null)
-      setVotes({ correct: 0, wrong: 0 })
-      fetchPlayers() // refresh scores since we deducted points
+        await supabase.from('rooms').update({
+          status: 'results',
+          buzzed_player_id: null
+        }).eq('id', roomId)
 
-      // Resume video exactly from where it was
-      if (playerRef.current && typeof playerRef.current.playVideo === 'function') {
-        try {
-          playerRef.current.playVideo()
-        } catch (e) { console.error("Could not resume youtube", e) }
+        setStatus('results')
+        setBuzzedPlayer(null)
+        setVotes({ correct: 0, wrong: 0 })
+        fetchPlayers() // Refresh scores
+        startResultsTimer()
+      } else {
+        // Return to playing state for the rebound
+        await supabase.from('rooms').update({
+          status: 'playing',
+          buzzed_player_id: null
+        }).eq('id', roomId)
+
+        setStatus('playing')
+        setBuzzedPlayer(null)
+        setVotes({ correct: 0, wrong: 0 })
+        fetchPlayers() // refresh scores since we deducted points
+
+        // Resume video exactly from where it was
+        if (playerRef.current && typeof playerRef.current.playVideo === 'function') {
+          try {
+            playerRef.current.playVideo()
+          } catch (e) { console.error("Could not resume youtube", e) }
+        }
+
+        startRoundTimer(false)
       }
-
-      startRoundTimer(false)
     }, 2000)
   }
 
