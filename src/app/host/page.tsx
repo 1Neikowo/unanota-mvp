@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabaseClient'
 import { Play, Loader2, Music, Check, X, Users, Trophy, ClockAlert } from 'lucide-react'
 import YouTube from 'react-youtube'
 import { motion, AnimatePresence } from 'framer-motion'
+import confetti from 'canvas-confetti'
 
 // The Categories the Host can choose from
 const CATEGORIES = [
@@ -27,6 +28,24 @@ interface Player {
   has_voted: boolean;
 }
 
+function AnimatedScore({ target }: { target: number }) {
+  const [display, setDisplay] = useState(0)
+  useEffect(() => {
+    if (target === 0) { setDisplay(0); return }
+    const duration = 800
+    const steps = Math.max(target, 20)
+    const stepMs = duration / steps
+    let current = 0
+    const interval = setInterval(() => {
+      current += Math.ceil(target / steps)
+      if (current >= target) { setDisplay(target); clearInterval(interval) }
+      else setDisplay(current)
+    }, stepMs)
+    return () => clearInterval(interval)
+  }, [target])
+  return <>{display}</>
+}
+
 export default function HostPage() {
   const [roomId, setRoomId] = useState<string | null>(null)
   const [pinCode, setPinCode] = useState<string>('')
@@ -43,6 +62,8 @@ export default function HostPage() {
   const [isPlayingReplay, setIsPlayingReplay] = useState<boolean>(false)
   const [roundTimer, setRoundTimer] = useState<number>(30)
   const [resultsTimer, setResultsTimer] = useState<number>(30)
+  const [countdown, setCountdown] = useState<number | null>(null)
+  const [showFlash, setShowFlash] = useState(false)
 
   const roundIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const resultsIntervalRef = useRef<NodeJS.Timeout | null>(null)
@@ -160,6 +181,30 @@ export default function HostPage() {
     }
   }, [votes, players, status])
 
+  // Fire confetti when results show AND someone correctly guessed
+  useEffect(() => {
+    if (status !== 'results' || !buzzedPlayer) return
+
+    const fire = (angle: number, origin: { x: number; y: number }) => {
+      confetti({
+        angle,
+        spread: 70,
+        particleCount: 120,
+        origin,
+        colors: ['#f472b6', '#818cf8', '#34d399', '#fbbf24', '#60a5fa'],
+        zIndex: 9999,
+      })
+    }
+
+    // Two cannons from bottom-left and bottom-right
+    const t1 = setTimeout(() => fire(60, { x: 0, y: 1 }), 100)
+    const t2 = setTimeout(() => fire(120, { x: 1, y: 1 }), 200)
+    const t3 = setTimeout(() => fire(70, { x: 0.1, y: 0.9 }), 500)
+    const t4 = setTimeout(() => fire(110, { x: 0.9, y: 0.9 }), 600)
+
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4) }
+  }, [status, buzzedPlayer])
+
   const startRoundTimer = (reset: boolean = true) => {
     clearRoundTimer();
     if (reset) {
@@ -191,7 +236,8 @@ export default function HostPage() {
       setResultsTimer((prev) => {
         if (prev <= 1) {
           clearResultsTimer();
-          handleNextRound();
+          // Fade out the replay music before auto-advancing to next round
+          fadeOutYoutube(600).then(() => handleNextRound())
           return 0;
         }
         return prev - 1;
@@ -206,20 +252,43 @@ export default function HostPage() {
     }
   }
 
+  const fadeOutYoutube = (durationMs = 700): Promise<void> => {
+    return new Promise((resolve) => {
+      if (!playerRef.current) { resolve(); return }
+      try {
+        const steps = Math.round(durationMs / 25)
+        const stepMs = durationMs / steps
+        let vol = 100
+        const interval = setInterval(() => {
+          vol -= 100 / steps
+          if (vol <= 0) {
+            clearInterval(interval)
+            playerRef.current?.pauseVideo()
+            playerRef.current?.setVolume(100)
+            resolve()
+          } else {
+            playerRef.current?.setVolume(Math.max(0, vol))
+          }
+        }, stepMs)
+      } catch (e) { resolve() }
+    })
+  }
+
   const handleRoundTimeout = async () => {
     if (!roomId) return;
 
-    // Time is up, nobody guessed. Go directly to results.
+    // Time is up, nobody guessed — music keeps playing into results screen (replay).
+    setBuzzedPlayer(null)
     setStatus('results')
 
     if (playerRef.current && typeof playerRef.current.playVideo === 'function') {
-      try { 
-        playerRef.current.playVideo();
-        setIsPlayingReplay(true);
+      try {
+        playerRef.current.playVideo()
+        setIsPlayingReplay(true)
       } catch (e) { }
     }
 
-    await supabase.from('rooms').update({ status: 'results' }).eq('id', roomId)
+    await supabase.from('rooms').update({ status: 'results', buzzed_player_id: null }).eq('id', roomId)
     startResultsTimer()
   }
 
@@ -241,7 +310,7 @@ export default function HostPage() {
       if (nextExcludedCount >= players.length) {
         // Everyone has guessed incorrectly. End the round.
         if (playerRef.current && typeof playerRef.current.playVideo === 'function') {
-          try { 
+          try {
             playerRef.current.playVideo();
             setIsPlayingReplay(true);
           } catch (e) { }
@@ -287,67 +356,95 @@ export default function HostPage() {
     if (data) setPlayers(data)
   }
 
+  const playTick = () => {
+    try {
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)()
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(800, ctx.currentTime)
+      gain.gain.setValueAtTime(0.4, ctx.currentTime)
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.07)
+      osc.start(ctx.currentTime)
+      osc.stop(ctx.currentTime + 0.07)
+      osc.onended = () => ctx.close()
+    } catch (e) { }
+  }
+
+
+
+  const runCountdown = (): Promise<void> => {
+    return new Promise((resolve) => {
+      setCountdown(3); playTick()
+      setTimeout(() => { setCountdown(2); playTick() }, 1000)
+      setTimeout(() => { setCountdown(1); playTick() }, 2000)
+      setTimeout(() => {
+        setCountdown(null)
+        resolve()
+      }, 3000)
+    })
+  }
+
   const startGame = async () => {
     try {
-      setStatus('playing')
-      setExcludedPlayers([])
+      // Start countdown first, without changing game status or loading the song yet
       clearRoundTimer();
       setRoundTimer(30);
+      isProcessingVoteRef.current = false;
 
       let fetchUrl = `/api/youtube?category=${encodeURIComponent(category)}`
 
-      // If the selected category from the buttons has a hardcoded playlistId, use it
       const categoryConfig = CATEGORIES.find(c => c.name === category);
       if (categoryConfig && categoryConfig.playlistId) {
-        fetchUrl = `/api/youtube?customPlaylistId=${categoryConfig.playlistId}`;
+        fetchUrl = `/api/youtube?customPlaylistId=${categoryConfig.playlistId}`
       }
 
-      // If user pasted a custom link, extract the list ID and tell the API to use it directly
+      // Determine song to play (figure out URL first)
+      let overrideSong: any = null
+
       if (customUrl.trim() !== '') {
         const listMatch = customUrl.match(/[?&]list=([^#\&\?]+)/)
         const videoMatch = customUrl.match(/[?&]v=([^#\&\?]+)/)
-
-        let playlistId = listMatch ? listMatch[1] : null;
-        let videoId = videoMatch ? videoMatch[1] : null;
+        const playlistId = listMatch ? listMatch[1] : null
+        const videoId = videoMatch ? videoMatch[1] : null
 
         if (playlistId) {
           fetchUrl = `/api/youtube?customPlaylistId=${playlistId}`
         } else if (videoId) {
-          // Fallback: Just play the single video they pasted if it's not a playlist
-          // We mock the API response format
-          setCurrentSong({
+          overrideSong = {
             trackName: 'Canción a pedido',
             artistName: 'YouTube',
             youtubeId: videoId,
             startAt: 0,
             artworkUrl100: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
-          })
-
-          await supabase.from('rooms').update({
-            status: 'playing',
-            current_song_url: `https://youtube.com/watch?v=${videoId}`,
-            current_song_name: 'Canción a pedido',
-            current_song_artwork: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-            buzzed_player_id: null
-          }).eq('id', roomId)
-
-          return; // Stop here, we bypassed the API
+          }
         }
       }
 
-      const res = await fetch(fetchUrl)
-      if (!res.ok) throw new Error('Failed fetching playlist directly')
+      // Fetch song in PARALLEL with countdown so there's no extra wait time
+      const [, song] = await Promise.all([
+        runCountdown(),
+        overrideSong
+          ? Promise.resolve(overrideSong)
+          : fetch(fetchUrl)
+            .then(res => { if (!res.ok) throw new Error('Failed fetching playlist'); return res.json() })
+            .then(songs => songs[Math.floor(Math.random() * songs.length)])
+      ])
 
-      const songs = await res.json()
-      const randomSong = songs[Math.floor(Math.random() * songs.length)]
-      setCurrentSong(randomSong)
+      // NOW (after countdown finishes) update state and start round
+      setExcludedPlayers([])
+      setBuzzedPlayer(null)
+      setVotes({ correct: 0, wrong: 0 })
+      setCurrentSong(song)
+      setStatus('playing')
 
-      // 2. Update room status, using Youtube Thumbnail for artwork
       await supabase.from('rooms').update({
         status: 'playing',
-        current_song_url: `https://youtube.com/watch?v=${randomSong.youtubeId}`,
-        current_song_name: randomSong.trackName,
-        current_song_artwork: randomSong.artworkUrl100,
+        current_song_url: `https://youtube.com/watch?v=${song.youtubeId}`,
+        current_song_name: song.trackName,
+        current_song_artwork: song.artworkUrl100,
         buzzed_player_id: null
       }).eq('id', roomId)
 
@@ -363,13 +460,58 @@ export default function HostPage() {
     // If we're already buzzed locally, ignore latecomers
     if (status === 'buzzed') return;
 
+    setShowFlash(true)
+    setTimeout(() => setShowFlash(false), 400)
+
     setStatus('buzzed')
 
-    if (playerRef.current && typeof playerRef.current.pauseVideo === 'function') {
+
+    // Both fade-out and reverb tail start simultaneously
+    if (playerRef.current) {
       try {
-        playerRef.current.pauseVideo()
-      } catch (e) { console.error("Could not pause youtube", e) }
+        // 1. YouTube volume fade 100→0 over 700ms
+        const fadeDuration = 700
+        const steps = 28
+        const stepMs = fadeDuration / steps
+        let vol = 100
+        const fadeInterval = setInterval(() => {
+          vol -= 100 / steps
+          if (vol <= 0) {
+            clearInterval(fadeInterval)
+            playerRef.current?.pauseVideo()
+            playerRef.current?.setVolume(100) // restore for next round
+          } else {
+            playerRef.current?.setVolume(Math.max(0, vol))
+          }
+        }, stepMs)
+      } catch (e) { console.error('Could not fade youtube', e) }
     }
+
+    // 2. Reverb tail starts at the same time as the fade (simultaneous)
+    try {
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)()
+      const duration = 1.8
+      const buffer = ctx.createBuffer(2, ctx.sampleRate * duration, ctx.sampleRate)
+      for (let ch = 0; ch < 2; ch++) {
+        const data = buffer.getChannelData(ch)
+        for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1
+      }
+      const source = ctx.createBufferSource()
+      source.buffer = buffer
+      const filter = ctx.createBiquadFilter()
+      filter.type = 'lowpass'
+      filter.frequency.setValueAtTime(800, ctx.currentTime)
+      const gain = ctx.createGain()
+      gain.gain.setValueAtTime(0, ctx.currentTime)
+      gain.gain.linearRampToValueAtTime(0.06, ctx.currentTime + 0.3)  // slow fade-in
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration)
+      source.connect(filter)
+      filter.connect(gain)
+      gain.connect(ctx.destination)
+      source.start()
+      source.onended = () => ctx.close()
+    } catch (e) {}
+
 
     // Find player who buzzed
     const { data: player } = await supabase.from('players').select('*').eq('id', playerId).single()
@@ -424,17 +566,13 @@ export default function HostPage() {
     }
   }
 
-  const pauseReplay = () => {
+  const pauseReplay = async () => {
     setIsPlayingReplay(false)
-    if (playerRef.current && typeof playerRef.current.pauseVideo === 'function') {
-      try {
-        playerRef.current.pauseVideo()
-      } catch (e) { console.error("Pause replay err", e) }
-    }
+    await fadeOutYoutube(600)
   }
 
   const handleNextRound = async () => {
-    pauseReplay()
+    await pauseReplay()
     clearResultsTimer()
     await startGame()
   }
@@ -485,6 +623,35 @@ export default function HostPage() {
       </div>
 
       <div className="container mx-auto px-4 min-h-[100dvh] flex flex-col justify-center items-center py-6 relative z-10 w-full max-w-5xl">
+
+        {/* Red flash overlay on buzz */}
+        {showFlash && (
+          <div
+            className="fixed inset-0 z-40 pointer-events-none"
+            style={{ background: 'rgba(220,38,38,0.35)', animation: 'flashFade 0.4s ease-out forwards' }}
+          />
+        )}
+
+        {/* Countdown Overlay */}
+        {countdown !== null && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-md animate-in fade-in duration-300">
+            <div key={countdown} className="flex flex-col items-center animate-in zoom-in-50 duration-300">
+              <span
+                className="font-black leading-none select-none"
+                style={{
+                  fontSize: 'clamp(10rem, 30vw, 20rem)',
+                  background: 'linear-gradient(135deg, #f472b6, #818cf8)',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  filter: 'drop-shadow(0 0 60px rgba(244,114,182,0.7))',
+                }}
+              >
+                {countdown}
+              </span>
+            </div>
+          </div>
+        )}
+
 
         {/* State: LOBBY */}
         {status === 'lobby' && (
@@ -589,7 +756,11 @@ export default function HostPage() {
         {status === 'playing' && (
           <div className="text-center animate-in zoom-in duration-500 flex flex-col items-center">
 
-            <div className="text-4xl font-black mb-8 px-6 py-2 bg-black/40 rounded-full border border-white/10 text-pink-400">
+            <div className={`text-4xl font-black mb-8 px-6 py-2 bg-black/40 rounded-full border transition-all duration-300 ${
+              roundTimer <= 5
+                ? 'text-red-400 border-red-500/50 animate-pulse shadow-[0_0_20px_rgba(239,68,68,0.5)]'
+                : 'text-pink-400 border-white/10'
+            }`}>
               {roundTimer}s
             </div>
 
@@ -631,7 +802,7 @@ export default function HostPage() {
         {status === 'voting' && buzzedPlayer && (
           <div className="text-center w-full max-w-5xl animate-in zoom-in-95 duration-700">
             <h2 className="text-4xl md:text-6xl lg:text-7xl font-black mb-16 text-white drop-shadow-xl inline-flex flex-wrap items-center justify-center gap-4">
-              ¿Le achuntó 
+              ¿Le achuntó
               <span className="text-pink-400 bg-black/20 px-6 py-2 rounded-2xl truncate max-w-[50vw] inline-block align-bottom shadow-[0_0_20px_rgba(236,72,153,0.3)] border border-pink-500/20">
                 {buzzedPlayer.name}
               </span>?
@@ -661,7 +832,7 @@ export default function HostPage() {
                 </div>
                 {/* Progress bar container */}
                 <div className="w-full h-6 bg-black/40 rounded-full overflow-hidden border border-white/10 p-1">
-                  <motion.div 
+                  <motion.div
                     className="h-full bg-gradient-to-r from-pink-500 to-indigo-500 rounded-full"
                     initial={{ width: 0 }}
                     animate={{ width: `${((votes.correct + votes.wrong) / Math.max(1, players.length - 1)) * 100}%` }}
@@ -703,7 +874,7 @@ export default function HostPage() {
                     >
                       {/* Efecto hover sutil en el fondo del jugador */}
                       <div className="absolute inset-0 bg-gradient-to-r from-pink-500/10 to-transparent translate-x-[-100%] group-hover:translate-x-0 transition-transform duration-500"></div>
-                      
+
                       <div className="flex items-center gap-5 relative z-10">
                         <span className={`text-4xl font-black ${i === 0 ? 'text-yellow-400 drop-shadow-[0_0_10px_rgba(250,204,21,0.5)]' : i === 1 ? 'text-slate-300' : i === 2 ? 'text-amber-600' : 'text-white/30'}`}>
                           #{i + 1}
@@ -711,7 +882,7 @@ export default function HostPage() {
                         <span className="text-3xl font-bold text-white truncate max-w-[200px]">{p.name}</span>
                       </div>
                       <span className="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-pink-400 to-orange-400 relative z-10">
-                        {p.score} pts
+                        <AnimatedScore target={p.score} /> pts
                       </span>
                     </motion.div>
                   ))}
@@ -721,7 +892,7 @@ export default function HostPage() {
 
             {/* Columna Derecha: Resultado y Canción */}
             <div className="flex-[1.5] flex flex-col items-center text-center justify-between">
-              
+
               {/* Banner de Resultado */}
               <div className="w-full max-w-2xl mb-10">
                 {!buzzedPlayer ? (
@@ -734,7 +905,7 @@ export default function HostPage() {
                     <div className="absolute inset-0 bg-gradient-to-r from-emerald-400/0 via-emerald-400/20 to-emerald-400/0 animate-[shimmer_2s_infinite]"></div>
                     <Check className="w-16 h-16 text-emerald-400 drop-shadow-[0_0_15px_rgba(52,211,153,0.8)] relative z-10" />
                     <div className="text-left relative z-10">
-                      <span className="text-4xl font-black text-emerald-400 block mb-1 leading-tight drop-shadow-md">¡Veredicto Correcto!</span>
+                      <span className="text-4xl font-black text-emerald-400 block mb-1 leading-tight drop-shadow-md">¡Correcto!</span>
                       <span className="text-2xl text-emerald-200 font-bold">+1 Punto para {buzzedPlayer.name}</span>
                     </div>
                   </div>
@@ -760,7 +931,7 @@ export default function HostPage() {
                     className="w-80 h-80 lg:w-96 lg:h-96 object-cover transform group-hover:scale-105 transition-transform duration-700"
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent"></div>
-                  
+
                   {/* Textos dentro de la carátula en parte inferior */}
                   <div className="absolute bottom-0 left-0 right-0 p-8 text-left">
                     <h3 className="text-3xl lg:text-4xl font-black mb-2 text-white drop-shadow-lg leading-tight line-clamp-2">{currentSong.trackName}</h3>
