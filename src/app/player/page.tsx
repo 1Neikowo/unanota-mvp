@@ -2,9 +2,9 @@
 
 import { useState, useEffect } from 'react'
 import { supabase } from '@/lib/supabaseClient'
-import { Loader2, Music, Check, X, Bell } from 'lucide-react'
+import { Loader2, Music, Check, X, Bell, Trophy } from 'lucide-react'
 
-type RoomStatus = 'lobby' | 'playing' | 'buzzed' | 'voting' | 'results';
+type RoomStatus = 'lobby' | 'playing' | 'buzzed' | 'voting' | 'results' | 'final_results';
 
 export default function PlayerPage() {
   const [pin, setPin] = useState('')
@@ -315,6 +315,19 @@ export default function PlayerPage() {
              <h2 className="text-3xl font-black mb-6">¡Ronda Terminada!</h2>
              <p className="text-xl text-indigo-300 mb-8">Mira el ranking en la pantalla principal o espera la siguiente ronda.</p>
              <Loader2 className="w-10 h-10 text-indigo-500 animate-spin mx-auto opacity-50" />
+           </div>
+        )}
+
+        {/* State: FINAL RESULTS */}
+        {status === 'final_results' && (
+           <div className="text-center w-full bg-slate-800/80 p-10 rounded-3xl border border-yellow-500/30 shadow-[0_0_40px_rgba(234,179,8,0.2)] animate-in zoom-in-95">
+             <Trophy className="w-20 h-20 text-yellow-400 mx-auto mb-6 drop-shadow-[0_0_15px_rgba(250,204,21,0.6)] animate-bounce" />
+             <h2 className="text-4xl font-black mb-4 bg-clip-text text-transparent bg-gradient-to-r from-yellow-300 to-orange-500">
+               ¡Fin del Juego!
+             </h2>
+             <p className="text-xl text-indigo-200">
+               Mira la pantalla principal para descubrir quién se llevó la victoria. ¡Buena partida!
+             </p>
            </div>
         )}
 

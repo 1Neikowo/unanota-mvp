@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabaseClient'
-import { Play, Loader2, Music, Check, X, Users, Trophy, ClockAlert } from 'lucide-react'
+import { Play, Loader2, Music, Check, X, Users, Trophy, ClockAlert, Crown, Medal } from 'lucide-react'
 import YouTube from 'react-youtube'
 import { motion, AnimatePresence } from 'framer-motion'
 import confetti from 'canvas-confetti'
@@ -19,7 +19,7 @@ const CATEGORIES = [
   { name: 'Easykid', playlistId: 'PLxA687tYuMWh_K7R-29OGzhIma_x2RpzZ' }
 ]
 
-type RoomStatus = 'lobby' | 'playing' | 'buzzed' | 'voting' | 'results';
+type RoomStatus = 'lobby' | 'playing' | 'buzzed' | 'voting' | 'results' | 'final_results';
 
 interface Player {
   id: string;
@@ -60,10 +60,14 @@ export default function HostPage() {
 
   const [replayTimer, setReplayTimer] = useState<NodeJS.Timeout | null>(null)
   const [isPlayingReplay, setIsPlayingReplay] = useState<boolean>(false)
-  const [roundTimer, setRoundTimer] = useState<number>(30)
+  const [roundTimer, setRoundTimer] = useState<number>(20)
   const [resultsTimer, setResultsTimer] = useState<number>(30)
   const [countdown, setCountdown] = useState<number | null>(null)
   const [showFlash, setShowFlash] = useState(false)
+  
+  const [totalRounds, setTotalRounds] = useState<number>(10)
+  const [currentRound, setCurrentRound] = useState<number>(1)
+  const [playedSongs, setPlayedSongs] = useState<string[]>([])
 
   const roundIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const resultsIntervalRef = useRef<NodeJS.Timeout | null>(null)
@@ -205,10 +209,31 @@ export default function HostPage() {
     return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4) }
   }, [status, buzzedPlayer])
 
+  // Fire massive confetti for final results
+  useEffect(() => {
+    if (status !== 'final_results') return;
+    const duration = 5 * 1000;
+    const animationEnd = Date.now() + duration;
+    const defaults = { startVelocity: 30, spread: 360, ticks: 60, zIndex: 9999 };
+
+    function randomInRange(min: number, max: number) {
+      return Math.random() * (max - min) + min;
+    }
+
+    const interval: any = setInterval(function() {
+      const timeLeft = animationEnd - Date.now();
+      if (timeLeft <= 0) return clearInterval(interval);
+      const particleCount = 50 * (timeLeft / duration);
+      confetti({ ...defaults, particleCount, origin: { x: randomInRange(0.1, 0.3), y: Math.random() - 0.2 } });
+      confetti({ ...defaults, particleCount, origin: { x: randomInRange(0.7, 0.9), y: Math.random() - 0.2 } });
+    }, 250);
+    return () => clearInterval(interval);
+  }, [status]);
+
   const startRoundTimer = (reset: boolean = true) => {
     clearRoundTimer();
     if (reset) {
-      setRoundTimer(30);
+      setRoundTimer(20);
     }
     roundIntervalRef.current = setInterval(() => {
       setRoundTimer((prev) => {
@@ -387,11 +412,58 @@ export default function HostPage() {
     })
   }
 
+  const skipToNextSongSilently = async () => {
+    try {
+      let fetchUrl = `/api/youtube?category=${encodeURIComponent(category)}`
+      const categoryConfig = CATEGORIES.find(c => c.name === category);
+      if (categoryConfig && categoryConfig.playlistId) {
+        fetchUrl = `/api/youtube?customPlaylistId=${categoryConfig.playlistId}`
+      }
+
+      if (customUrl.trim() !== '') {
+        const listMatch = customUrl.match(/[?&]list=([^#\&\?]+)/)
+        if (listMatch && listMatch[1]) {
+          fetchUrl = `/api/youtube?customPlaylistId=${listMatch[1]}`
+        }
+      }
+
+      // Fetch silently sin mostrar el 3..2..1 ni pausar el juego
+      const res = await fetch(fetchUrl);
+      if (!res.ok) throw new Error('Failed fetching replacement song');
+      const songs = await res.json();
+      
+      let unplayedSongs = songs.filter((s: any) => !playedSongs.includes(s.youtubeId));
+      if (unplayedSongs.length === 0) {
+        unplayedSongs = songs; // Si la playlist es chiquita y se acabaron, repetimos.
+        setPlayedSongs([]); // Reseteamos historial
+      }
+      const song = unplayedSongs[Math.floor(Math.random() * unplayedSongs.length)];
+
+      setPlayedSongs(prev => [...prev, song.youtubeId]);
+      setCurrentSong(song);
+
+      // Update DB silently para que los demás vean la canción correcta al final
+      if (roomId) {
+        await supabase.from('rooms').update({
+          current_song_url: `https://youtube.com/watch?v=${song.youtubeId}`,
+          current_song_name: song.trackName,
+          current_song_artwork: song.artworkUrl100,
+        }).eq('id', roomId)
+      }
+
+      // Reiniciar timer a 30 para compensar el segundo que se perdió en cargar
+      setRoundTimer(20);
+
+    } catch (e) {
+      console.warn("Advertencia al hacer salto silencioso (fetch falló):", e);
+    }
+  }
+
   const startGame = async () => {
     try {
       // Start countdown first, without changing game status or loading the song yet
       clearRoundTimer();
-      setRoundTimer(30);
+      setRoundTimer(20);
       isProcessingVoteRef.current = false;
 
       let fetchUrl = `/api/youtube?category=${encodeURIComponent(category)}`
@@ -423,35 +495,52 @@ export default function HostPage() {
         }
       }
 
+      // If we are starting from lobby, reset round to 1 and played songs to empty (unless custom override)
+      if (status === 'lobby') {
+        setCurrentRound(1);
+        setPlayedSongs([]);
+      }
+
       // Fetch song in PARALLEL with countdown so there's no extra wait time
-      const [, song] = await Promise.all([
+      const [, fetchedSongs] = await Promise.all([
         runCountdown(),
         overrideSong
-          ? Promise.resolve(overrideSong)
+          ? Promise.resolve([overrideSong])
           : fetch(fetchUrl)
             .then(res => { if (!res.ok) throw new Error('Failed fetching playlist'); return res.json() })
-            .then(songs => songs[Math.floor(Math.random() * songs.length)])
       ])
+      
+      let songToPlay = overrideSong;
+      if (!songToPlay) {
+        let unplayedSongs = fetchedSongs.filter((s: any) => !playedSongs.includes(s.youtubeId));
+        if (unplayedSongs.length === 0) {
+          unplayedSongs = fetchedSongs;
+          setPlayedSongs([]);
+        }
+        songToPlay = unplayedSongs[Math.floor(Math.random() * unplayedSongs.length)];
+        setPlayedSongs(prev => [...prev, songToPlay.youtubeId]);
+      }
 
       // NOW (after countdown finishes) update state and start round
       setExcludedPlayers([])
       setBuzzedPlayer(null)
       setVotes({ correct: 0, wrong: 0 })
-      setCurrentSong(song)
+      setCurrentSong(songToPlay)
       setStatus('playing')
 
       await supabase.from('rooms').update({
         status: 'playing',
-        current_song_url: `https://youtube.com/watch?v=${song.youtubeId}`,
-        current_song_name: song.trackName,
-        current_song_artwork: song.artworkUrl100,
+        current_song_url: `https://youtube.com/watch?v=${songToPlay.youtubeId}`,
+        current_song_name: songToPlay.trackName,
+        current_song_artwork: songToPlay.artworkUrl100,
         buzzed_player_id: null
       }).eq('id', roomId)
 
       startRoundTimer(true)
 
     } catch (e) {
-      console.error("Error starting game", e)
+      console.warn("Advertencia al cargar playlist (API falló al descargar la lista):", e)
+      alert("No se pudo descargar la lista de canciones. Puede estar vacía, ser privada o inválida.");
       setStatus('lobby')
     }
   }
@@ -510,7 +599,7 @@ export default function HostPage() {
       gain.connect(ctx.destination)
       source.start()
       source.onended = () => ctx.close()
-    } catch (e) {}
+    } catch (e) { }
 
 
     // Find player who buzzed
@@ -574,7 +663,25 @@ export default function HostPage() {
   const handleNextRound = async () => {
     await pauseReplay()
     clearResultsTimer()
-    await startGame()
+    
+    if (currentRound >= totalRounds) {
+      // End game
+      setStatus('final_results')
+      await supabase.from('rooms').update({ status: 'final_results' }).eq('id', roomId)
+    } else {
+      setCurrentRound(prev => prev + 1)
+      await startGame()
+    }
+  }
+
+  const handleReturnToLobby = async () => {
+    setStatus('lobby')
+    setCurrentRound(1)
+    setCategory('')
+    setCustomUrl('')
+    await supabase.from('rooms').update({ status: 'lobby', buzzed_player_id: null }).eq('id', roomId)
+    await supabase.from('players').update({ score: 0, has_voted: false }).eq('room_id', roomId)
+    fetchPlayers()
   }
 
   if (!roomId) {
@@ -606,6 +713,18 @@ export default function HostPage() {
                 e.target.seekTo(currentSong.startAt, true);
                 e.target.playVideo();
               }
+            }
+          }}
+          onError={(e) => {
+            console.warn("YouTube Player Error (canción bloqueada o no disponible):", e.data);
+            if (customUrl.trim() !== '' && !customUrl.includes('list=')) {
+              alert("El video individual que subiste tiene restricciones. Por favor, ingresa otro enlace o usa una de las categorías.");
+              setStatus('lobby');
+              return;
+            }
+            // Silent skip para playlists (solo si estamos en la ronda jugando)
+            if (status === 'playing') {
+              skipToNextSongSilently();
             }
           }}
           opts={{
@@ -705,6 +824,21 @@ export default function HostPage() {
                   </div>
 
                   <div className="w-full">
+                    <div className="flex flex-col mb-8 bg-black/20 rounded-2xl p-4">
+                      <h3 className="text-xl font-bold mb-3 text-purple-200">Duración:</h3>
+                      <div className="flex flex-wrap gap-2 justify-center">
+                        {[5, 10, 15, 20].map((r) => (
+                           <button
+                             key={r}
+                             onClick={() => setTotalRounds(r)}
+                             className={`px-4 py-2 rounded-xl text-lg font-bold transition-all ${totalRounds === r ? 'bg-indigo-500 text-white shadow-md' : 'bg-white/10 text-indigo-300 hover:bg-white/20'}`}
+                           >
+                             {r} Rondas
+                           </button>
+                        ))}
+                      </div>
+                    </div>
+
                     <p className="text-base text-indigo-300 mb-3 font-medium">¿O prefieres tu propia Playlist de YouTube?</p>
                     <input
                       type="text"
@@ -755,12 +889,15 @@ export default function HostPage() {
         {/* State: PLAYING */}
         {status === 'playing' && (
           <div className="text-center animate-in zoom-in duration-500 flex flex-col items-center">
+            
+            <div className="absolute top-4 left-4 bg-black/40 px-6 py-2 rounded-full border border-white/10 text-xl font-bold text-purple-200">
+              Ronda {currentRound} / {totalRounds}
+            </div>
 
-            <div className={`text-4xl font-black mb-8 px-6 py-2 bg-black/40 rounded-full border transition-all duration-300 ${
-              roundTimer <= 5
+            <div className={`text-4xl font-black mb-8 px-6 py-2 bg-black/40 rounded-full border transition-all duration-300 ${roundTimer <= 5
                 ? 'text-red-400 border-red-500/50 animate-pulse shadow-[0_0_20px_rgba(239,68,68,0.5)]'
                 : 'text-pink-400 border-white/10'
-            }`}>
+              }`}>
               {roundTimer}s
             </div>
 
@@ -961,6 +1098,75 @@ export default function HostPage() {
                 </button>
               </div>
             </div>
+
+          </div>
+        )}
+
+        {/* State: FINAL RESULTS */}
+        {status === 'final_results' && (
+          <div className="w-full max-w-6xl flex flex-col items-center text-center animate-in zoom-in-95 duration-1000 h-full justify-center">
+            
+            <div className="relative mb-16 mt-8">
+              <div className="absolute inset-0 bg-pink-500/30 blur-[60px] rounded-full"></div>
+              <h2 className="relative text-7xl md:text-9xl font-black text-transparent bg-clip-text bg-gradient-to-br from-pink-300 via-purple-300 to-indigo-300 drop-shadow-[0_10px_30px_rgba(236,72,153,0.3)] tracking-tighter">
+                JUEGO TERMINADO
+              </h2>
+              <p className="text-2xl text-pink-300/80 mt-4 font-bold tracking-widest uppercase">
+                Tras {totalRounds} Rondas, la batalla ha concluido
+              </p>
+            </div>
+
+            <div className="w-full flex flex-col md:flex-row gap-6 items-end justify-center mb-16 px-4">
+              
+              {/* Podium - #2 Plata */}
+              {players.length > 1 && players[1] && (
+                <div className="flex-1 flex flex-col items-center w-full max-w-xs animate-in slide-in-from-bottom-[100%] duration-[1500ms] delay-300">
+                  <div className="bg-slate-300/10 backdrop-blur-md rounded-[2.5rem] p-8 w-full border-2 border-slate-300/30 shadow-[0_0_60px_rgba(148,163,184,0.15)] relative overflow-hidden group hover:scale-[1.02] transition-transform">
+                    <div className="absolute inset-0 bg-gradient-to-b from-slate-300/10 to-transparent"></div>
+                    <Medal className="w-16 h-16 text-slate-300 mx-auto mb-6 drop-shadow-[0_0_15px_rgba(148,163,184,0.5)] group-hover:animate-spin" />
+                    <span className="block text-4xl font-black text-slate-300 mb-2 truncate">{players[1].name}</span>
+                    <span className="block text-2xl text-slate-400 font-bold">{players[1].score} <span className="text-lg opacity-70">PTS</span></span>
+                  </div>
+                </div>
+              )}
+
+              {/* Podium - #1 Oro */}
+              {players.length > 0 && players[0] && (
+                 <div className="flex-[1.2] flex flex-col items-center w-full max-w-sm z-10 animate-in slide-in-from-bottom-[100%] duration-[2000ms] delay-500">
+                  <div className="bg-yellow-400/10 backdrop-blur-xl rounded-[3rem] p-10 w-full border-4 border-yellow-400/50 shadow-[0_0_100px_rgba(250,204,21,0.25)] relative overflow-hidden group hover:scale-[1.03] transition-transform">
+                    <div className="absolute inset-0 bg-gradient-to-t from-yellow-500/20 via-yellow-400/10 to-transparent"></div>
+                     <Crown className="w-24 h-24 text-yellow-400 mx-auto mb-6 drop-shadow-[0_0_20px_rgba(250,204,21,0.8)] animate-pulse" />
+                    <span className="block text-5xl font-black text-transparent bg-clip-text bg-gradient-to-b from-yellow-200 to-yellow-500 drop-shadow-md mb-2 truncate">{players[0].name}</span>
+                    <span className="block text-3xl text-yellow-200 font-black">{players[0].score} <span className="text-xl opacity-70 border-l border-yellow-200/30 pl-2">PUNTOS</span></span>
+                  </div>
+                </div>
+              )}
+
+              {/* Podium - #3 Bronce */}
+              {players.length > 2 && players[2] && (
+                <div className="flex-1 flex flex-col items-center w-full max-w-xs animate-in slide-in-from-bottom-[100%] duration-[1000ms] delay-100">
+                  <div className="bg-amber-600/10 backdrop-blur-md rounded-[2.5rem] p-8 w-full border-2 border-amber-600/30 shadow-[0_0_60px_rgba(217,119,6,0.1)] relative overflow-hidden group hover:scale-[1.02] transition-transform">
+                    <div className="absolute inset-0 bg-gradient-to-b from-amber-600/10 to-transparent"></div>
+                    <Medal className="w-16 h-16 text-amber-500 mx-auto mb-6 drop-shadow-[0_0_15px_rgba(217,119,6,0.5)] group-hover:animate-spin" />
+                    <span className="block text-4xl font-black text-amber-500 mb-2 truncate">{players[2].name}</span>
+                    <span className="block text-2xl text-amber-600 font-bold">{players[2].score} <span className="text-lg opacity-70">PTS</span></span>
+                  </div>
+                </div>
+              )}
+
+            </div>
+
+            <button
+               onClick={handleReturnToLobby}
+               className="group relative bg-gradient-to-r from-pink-500 to-indigo-500 p-1 rounded-full shadow-[0_0_50px_rgba(236,72,153,0.5)] transition-all hover:scale-[1.05] active:scale-95 animate-in fade-in duration-1000 delay-[2500ms]"
+            >
+              <div className="absolute inset-0 bg-white/20 rounded-full blur-md group-hover:bg-white/30 transition-colors"></div>
+              <div className="relative bg-black/40 backdrop-blur-sm rounded-full px-12 py-6 flex items-center justify-center">
+                 <span className="text-2xl font-black text-white uppercase tracking-widest group-hover:drop-shadow-[0_0_10px_rgba(255,255,255,0.8)] transition-all">
+                   VOLVER AL LOBBY
+                 </span>
+              </div>
+            </button>
 
           </div>
         )}
